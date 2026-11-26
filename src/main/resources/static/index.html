@@ -43,6 +43,7 @@
       <button data-tab="team" class="tab" onclick="switchTab('team')">③ 班组看板</button>
       <button data-tab="sim" class="tab" onclick="switchTab('sim')">④ 模拟与扰动</button>
       <button data-tab="replay" class="tab" onclick="switchTab('replay')">⑤ 一键回放验证</button>
+      <button data-tab="cargo" class="tab" onclick="switchTab('cargo')">⑥ 货量变更·双轨影响</button>
     </nav>
     <div class="topbar-right">
       <span id="current-user" class="user-badge"></span>
@@ -166,6 +167,30 @@
         </div>
         <div id="replay-summary"></div>
         <div id="replay-result"></div>
+      </div>
+    </section>
+
+    <!-- ⑥ 货量变更 + 双轨影响 -->
+    <section id="tab-cargo" class="tab-panel">
+      <div class="card">
+        <div class="row-between wrap">
+          <h2>货量变更审计 · 依赖链 / 全港重排双结果</h2>
+          <div class="row gap wrap">
+            <label class="hint cg-choice"><input type="checkbox" id="cargo-c2" onchange="runCargoBoth()" />
+              人工选择：B 船改派 C2</label>
+            <button class="btn primary" onclick="runCargoBoth()">录入给定变更并计算两种结果</button>
+            <button class="btn" onclick="loadCargoScenario()">刷新场景</button>
+            <button class="btn success" id="btn-cargo-replay" onclick="runCargoReplayUi()">▶ feature-3 回放断言</button>
+          </div>
+        </div>
+        <p class="hint" id="cargo-headline">
+          场景：A 船 H1/H2 两舱货量各补增 1 小时 → 岸桥 C1 占用到 14:00，与 B 船 13:30 换班准备重叠；
+          Y-A1 堆位只剩原计划一半容量。依赖覆盖岸桥 / 堆位 / 跨泊位窗口；已完成工序与装卸记录不参与移动。
+        </p>
+        <div id="cargo-replay"></div>
+        <h3 class="cg-h3">货量变更审计（原申报 · 复测值 · 来源 · 时点，只增不改）</h3>
+        <div id="cargo-audit" class="cg-audit"><p class="hint">点击“录入给定变更并计算两种结果”。</p></div>
+        <div id="cargo-result"></div>
       </div>
     </section>
   </main>

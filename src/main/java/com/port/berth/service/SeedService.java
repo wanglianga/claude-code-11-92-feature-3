@@ -29,15 +29,20 @@ public class SeedService implements ApplicationRunner {
 
     private final JdbcTemplate jdbc;
     private final CatalogDao catalogDao;
+    private final CargoImpactService cargoImpactService;
 
-    public SeedService(JdbcTemplate jdbc, CatalogDao catalogDao) {
+    public SeedService(JdbcTemplate jdbc, CatalogDao catalogDao,
+                       CargoImpactService cargoImpactService) {
         this.jdbc = jdbc;
         this.catalogDao = catalogDao;
+        this.cargoImpactService = cargoImpactService;
     }
 
     @Override
     public void run(ApplicationArguments args) {
         seedIfEmpty();
+        // 老库可能已有账号但缺少 feature-3 日间作业网络，做一次幂等补齐
+        cargoImpactService.seedScenarioIfMissing();
     }
 
     public synchronized void seedIfEmpty() {
@@ -50,14 +55,16 @@ public class SeedService implements ApplicationRunner {
     /**清空全部业务表并恢复固定样例（回放/演示用）*/
     public synchronized void resetAndSeed() {
         jdbc.execute("""
-                TRUNCATE TABLE impact_item, disruption, plan_event, work_record,
+                TRUNCATE TABLE impact_report, cargo_change, handling_record,
+                    operation_dependency, port_operation, cargo_hatch, yard_stack,
+                    impact_item, disruption, plan_event, work_record,
                     resource_occupation, resource_lock, plan_segment, berth_plan,
                     equipment_fault, work_window, quay_crane, tug, pilot, tide_slot,
                     berth_cargo_limit, berth, voyage, ship, auth_token, app_user
                 RESTART IDENTITY CASCADE
                 """);
         seedAll();
-        log.info("场景已重置并重新播种");
+        log.info("场景已重置并重新播种（含 feature-3 货量变更日间网络）");
     }
 
     // ====================================================================
@@ -70,6 +77,7 @@ public class SeedService implements ApplicationRunner {
         seedPilots();
         seedTugs();
         seedCranes();
+        cargoImpactService.seedScenario();
     }
 
     private void seedUsers() {

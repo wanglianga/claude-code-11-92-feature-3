@@ -275,3 +275,131 @@ CREATE TABLE IF NOT EXISTS impact_item (
     handled     BOOLEAN NOT NULL DEFAULT FALSE
 );
 CREATE INDEX IF NOT EXISTS idx_impact_disruption ON impact_item(disruption_id);
+
+-- ============================================================================
+-- feature-3：货量变更审计 + 岸桥/堆位/跨泊位窗口依赖 + 两种重排影响分析
+-- 该域使用独立的“日间作业网络”固定样例（A/B/C/D 船，岸桥 C1/C2/C3），
+-- 与晚间深水靠泊样例（VOY-A..E / QC-1..4）互不干扰。
+-- ============================================================================
+
+-- 舱口与原申报作业量（一个船次两个舱口）
+CREATE TABLE IF NOT EXISTS cargo_hatch (
+    id                         BIGSERIAL PRIMARY KEY,
+    voyage_code                VARCHAR(24) NOT NULL,   -- A / B ...
+    hatch_code                 VARCHAR(24) NOT NULL,    -- H1 / H2
+    op_code                    VARCHAR(60),             -- 对应的未执行工序
+    seq_no                     INT NOT NULL DEFAULT 0,
+    title                      VARCHAR(160),
+    berth_code                 VARCHAR(24),
+    crane_code                 VARCHAR(24),
+    yard_code                  VARCHAR(24),
+    original_declared_minutes  INT NOT NULL DEFAULT 0,  -- 原申报作业分钟
+    original_declared_units    INT NOT NULL DEFAULT 0,  -- 原申报货量（箱）
+    unit_label                 VARCHAR(16) NOT NULL DEFAULT 'TEU',
+    UNIQUE (voyage_code, hatch_code)
+);
+
+-- 堆场/堆位能力：planned_capacity 原计划容量，available_capacity 变更时实际可用
+CREATE TABLE IF NOT EXISTS yard_stack (
+    id                 BIGSERIAL PRIMARY KEY,
+    code               VARCHAR(24) UNIQUE NOT NULL,
+    name               VARCHAR(160) NOT NULL,
+    berth_code         VARCHAR(24),
+    planned_capacity   INT NOT NULL,
+    available_capacity INT NOT NULL,
+    unit_label         VARCHAR(16) NOT NULL DEFAULT 'TEU',
+    capacity_note      TEXT
+);
+
+-- 工序节点（基线=已通知计划时间；分析只做 what-if 投影，不直接改写基线）
+CREATE TABLE IF NOT EXISTS port_operation (
+    id              BIGSERIAL PRIMARY KEY,
+    op_code         VARCHAR(60) UNIQUE NOT NULL,
+    voyage_code     VARCHAR(24) NOT NULL,
+    seq_no          INT NOT NULL DEFAULT 0,
+    title           VARCHAR(160) NOT NULL,
+    op_kind         VARCHAR(28) NOT NULL,
+        -- PILOT/BERTH/SHIFT_PREP/HATCH_OP/YARD_MOVE/TRANSFER/TRIM/UNBERTH/RORO/WINDOW
+    berth_code      VARCHAR(24),
+    resource_type   VARCHAR(16),           -- CRANE / YARD / BERTH / null
+    resource_code   VARCHAR(40),           -- C1 / Y-A1 / B2 ...
+    start_at        TIMESTAMP NOT NULL,    -- 基线（已通知）开始
+    end_at          TIMESTAMP NOT NULL,    -- 基线（已通知）结束
+    status          VARCHAR(16) NOT NULL DEFAULT 'PLANNED', -- PLANNED / DONE
+    notified        BOOLEAN NOT NULL DEFAULT TRUE,
+    detail_json     TEXT,
+    CHECK (end_at >= start_at)
+);
+CREATE INDEX IF NOT EXISTS idx_pop_voyage ON port_operation(voyage_code, seq_no);
+CREATE INDEX IF NOT EXISTS idx_pop_resource ON port_operation(resource_type, resource_code);
+
+-- 工序依赖边：op_code 依赖 depends_on_op_code
+CREATE TABLE IF NOT EXISTS operation_dependency (
+    id                 BIGSERIAL PRIMARY KEY,
+    op_code            VARCHAR(60) NOT NULL,
+    depends_on_op_code VARCHAR(60) NOT NULL,
+    dep_kind           VARCHAR(28) NOT NULL,
+        -- PRECEDENCE / SHARED_CRANE / YARD_CAPACITY / CROSS_BERTH_WINDOW
+    min_gap_minutes    INT NOT NULL DEFAULT 0,  -- FS 之间最小间隔（转场/缓冲）
+    propagate          BOOLEAN NOT NULL DEFAULT TRUE, -- FALSE=仅追踪/判冲突，不自动推移
+    detail             TEXT,
+    UNIQUE (op_code, depends_on_op_code, dep_kind)
+);
+CREATE INDEX IF NOT EXISTS idx_opdep_op ON operation_dependency(op_code);
+CREATE INDEX IF NOT EXISTS idx_opdep_on ON operation_dependency(depends_on_op_code);
+
+-- feature-3 已完成装卸记录：只增不改不删（触发器 trg_handling_record_immutable）
+CREATE TABLE IF NOT EXISTS handling_record (
+    id             BIGSERIAL PRIMARY KEY,
+    record_no      VARCHAR(48) UNIQUE NOT NULL,
+    voyage_code    VARCHAR(24) NOT NULL,
+    op_code        VARCHAR(60) NOT NULL,
+    hatch_code     VARCHAR(24),
+    operator_name  VARCHAR(128),
+    work_minutes   INT NOT NULL DEFAULT 0,
+    moved_units    INT NOT NULL DEFAULT 0,
+    result_note    TEXT,
+    started_at     TIMESTAMP,
+    completed_at   TIMESTAMP NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_handling_voyage ON handling_record(voyage_code);
+
+-- 货量变更审计：原申报 / 复测值 / 来源 / 时点，只增不改不删
+CREATE TABLE IF NOT EXISTS cargo_change (
+    id                            BIGSERIAL PRIMARY KEY,
+    change_no                     VARCHAR(48) UNIQUE NOT NULL,
+    batch_no                      VARCHAR(48),
+    voyage_code                   VARCHAR(24) NOT NULL,
+    hatch_code                    VARCHAR(24),
+    op_code                       VARCHAR(60),
+    metric                        VARCHAR(24) NOT NULL DEFAULT 'CARGO_WORKLOAD',
+    original_value                NUMERIC(14,2),   -- 原申报货量
+    remeasured_value              NUMERIC(14,2),   -- 复测货量
+    delta_value                   NUMERIC(14,2),
+    unit_label                    VARCHAR(16) DEFAULT 'TEU',
+    original_declared_minutes     INT,             -- 原申报作业分钟
+    revised_required_minutes      INT,             -- 复测后所需作业分钟
+    delta_minutes                 INT,             -- 补增作业分钟（本题每舱 +60）
+    original_declared_units       INT,
+    remeasured_units              INT,
+    source                        VARCHAR(200) NOT NULL, -- 来源（船代补报/水尺/理货）
+    source_ref                    VARCHAR(120),
+    observed_at                   TIMESTAMP NOT NULL,    -- 复测/来源时点
+    recorded_by                   VARCHAR(64),
+    reason                        TEXT,
+    created_at                    TIMESTAMP NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_cargo_change_voyage ON cargo_change(voyage_code);
+CREATE INDEX IF NOT EXISTS idx_cargo_change_batch ON cargo_change(batch_no);
+
+-- 两种重排影响分析结果留痕（报告 JSON）
+CREATE TABLE IF NOT EXISTS impact_report (
+    id           BIGSERIAL PRIMARY KEY,
+    report_no    VARCHAR(48) UNIQUE NOT NULL,
+    batch_no     VARCHAR(48),
+    mode         VARCHAR(24) NOT NULL,   -- DEPENDENCY_CHAIN / FULL_PORT
+    choices_json TEXT,
+    all_clear    BOOLEAN NOT NULL DEFAULT FALSE,
+    report_json  TEXT NOT NULL,
+    created_at   TIMESTAMP NOT NULL DEFAULT now()
+);

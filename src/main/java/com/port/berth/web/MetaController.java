@@ -47,6 +47,14 @@ public class MetaController {
                 Map.of("username", "admin", "password", "admin123",
                         "displayName", "系统管理员", "role", "ADMIN")));
         m.put("holdOnStageDefault", planService.isHoldOnStageDefault());
+        m.put("feature3CargoImpact", Map.of(
+                "headline", "A 船两舱各 +1h → C1 占用至 14:00 撞 B 船 13:30 换班准备；Y-A1 堆位仅剩一半",
+                "scenario", "/api/cargo/scenario",
+                "givenChange", "/api/cargo/given-change",
+                "analyze", "/api/cargo/analyze?mode=DEPENDENCY_CHAIN|FULL_PORT",
+                "analyzeBoth", "/api/cargo/analyze-both",
+                "replay", "/api/replays/cargo-change",
+                "modes", List.of("DEPENDENCY_CHAIN", "FULL_PORT")));
         return m;
     }
 }

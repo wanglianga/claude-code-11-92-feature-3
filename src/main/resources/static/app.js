@@ -152,6 +152,7 @@ function switchTab(tab) {
   if (tab === 'planner') { loadVoyages().then(renderPlannerSelect); }
   if (tab === 'team') { loadBoard(); startTeamTimer(); } else stopTeamTimer();
   if (tab === 'sim') { loadTideTable(); loadDisruptions(); }
+  if (tab === 'cargo') { loadCargoScenario(); }
 }
 function startTeamTimer() {
   stopTeamTimer();
@@ -648,6 +649,173 @@ function downloadReplay() {
   const blob = new Blob([JSON.stringify(state.lastReplay, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob); a.download = 'replay-result.json'; a.click();
+}
+
+/* ======================================================================
+   ⑥ feature-3 货量变更 · 依赖链 vs 全港重排
+   ====================================================================== */
+const CARGO_BATCH = 'BATCH-20261126-A-SURVEY';
+function cgHM(x) { return x ? String(x).slice(11, 16) : '--:--'; }
+function cgStateClass(s) {
+  return ({
+    RETAINED_COMPLETED: 'cg-done', VOLUME_EXTENDED: 'cg-ext', MOVED: 'cg-moved',
+    NEEDS_DECISION: 'cg-conflict', REASSIGNED: 'cg-reassign', KEPT: 'cg-kept',
+    UNCHANGED: 'cg-kept',
+  })[s] || 'cg-kept';
+}
+const CG_STATE_LABEL = {
+  RETAINED_COMPLETED: '已完成·保留', VOLUME_EXTENDED: '货量增加·延时', MOVED: '必须移动',
+  NEEDS_DECISION: '冲突·待人工选择', REASSIGNED: '改派资源', KEPT: '保持', UNCHANGED: '不变',
+};
+
+async function loadCargoScenario() {
+  try {
+    const s = await api('/api/cargo/scenario');
+    if (s.headline) $('#cargo-headline').textContent = '场景：' + s.headline;
+    if (Array.isArray(s.cargoChanges) && s.cargoChanges.length) renderCargoAudit(s.cargoChanges);
+  } catch (e) { /* 未登录等，忽略 */ }
+}
+
+async function runCargoBoth() {
+  const box = $('#cargo-result');
+  box.innerHTML = '<div class="verdict ok">⏳ 正在沿依赖链投影并做全港资源平衡…</div>';
+  try {
+    const crane = $('#cargo-c2').checked ? 'C2' : '';
+    const q = crane ? '?crane=' + encodeURIComponent(crane) : '';
+    const [both, changes] = await Promise.all([
+      api('/api/cargo/analyze-both' + q),
+      api('/api/cargo/changes?batchNo=' + encodeURIComponent(CARGO_BATCH)),
+    ]);
+    renderCargoAudit(changes);
+    renderCargoBoth(both);
+  } catch (e) {
+    box.innerHTML = '<div class="verdict bad">分析失败：' + esc(e.message) + '</div>';
+    showError(e);
+  }
+}
+
+function renderCargoAudit(changes) {
+  if (!changes || !changes.length) {
+    $('#cargo-audit').innerHTML = '<p class="hint">尚无变更记录。</p>';
+    return;
+  }
+  $('#cargo-audit').innerHTML = `<table class="data cg-table">
+    <thead><tr><th>船次/舱口</th><th>原申报</th><th>复测值</th><th>作业分钟 Δ</th>
+      <th>来源</th><th>来源单号</th><th>复测时点</th><th>记录人</th></tr></thead><tbody>
+    ${changes.map((c) => `<tr>
+      <td><b>${esc(c.voyageCode)}</b> / ${esc(c.hatchCode || '-')}</td>
+      <td>${esc(c.originalValue)} ${esc(c.unitLabel || '')}
+        <span class="hint">(${esc(c.originalDeclaredMinutes)}m)</span></td>
+      <td><b>${esc(c.remeasuredValue)}</b> ${esc(c.unitLabel || '')}
+        <span class="hint">(${esc(c.revisedRequiredMinutes)}m)</span></td>
+      <td class="cg-ext">+${esc(c.deltaMinutes)}m</td>
+      <td>${esc(c.source)}</td>
+      <td>${esc(c.sourceRef || '-')}</td>
+      <td>${fmtFull(c.observedAt)}</td>
+      <td>${esc(c.recordedBy || '-')}</td>
+    </tr>`).join('')}
+    </tbody></table>`;
+}
+
+function renderCargoBoth(d) {
+  const cmp = d.comparison || {};
+  $('#cargo-result').innerHTML = `
+    <div class="cg-cmp">
+      <div><b>依赖链受影响：</b>${(cmp.dependencyChainAffected || []).map((v) => `<span class="badge CONFIRMED">${v}</span>`).join(' ')}</div>
+      <div><b>全港受影响：</b>${(cmp.fullPortAffected || []).map((v) => `<span class="badge REPLANNED">${v}</span>`).join(' ')}</div>
+      <div class="hint">全港额外改动：<b>${esc((cmp.additionallyMovedByFullPort || []).join('、') || '无')}</b>
+        ｜链半径 ${cmp.chainBlastRadius} vs 全港 ${cmp.fullPortBlastRadius}</div>
+      <p class="hint">${esc(cmp.tradeoff || '')}</p>
+    </div>
+    <div class="cg-cols">
+      <div class="cg-col">${renderCargoMode(d.dependencyChain)}</div>
+      <div class="cg-col">${renderCargoMode(d.fullPort)}</div>
+    </div>`;
+}
+
+function renderCargoMode(r) {
+  if (!r) return '';
+  const conflicts = (r.manualConflicts || []).map(renderCargoConflict).join('');
+  const watch = (r.downstreamWatch || []).map((w) => `<li>⚠️ ${esc(w.message)}</li>`).join('');
+  const seqs = (r.operationSequences || []).map(renderVoyageSeq).join('');
+  const retained = (r.retainedCompletedOperations || [])
+    .map((o) => `<span class="badge seg-DONE">${esc(o.opCode)}</span>`).join(' ');
+  const recs = (r.completedHandlingRecords || []).length;
+  const edges = ((r.dependencyGraph || {}).edges || []);
+  return `
+    <h3 class="cg-h3">${esc(r.modeLabel)} <span class="hint">${esc(r.mode)}</span></h3>
+    <div class="cg-kpis">
+      <span>受影响船次 <b>${(r.affectedVoyageCodes || []).join('、')}</b></span>
+      <span>移动/延时工序 <b>${(r.blastRadius || {}).movedOrChangedOperations}</b></span>
+      <span>人工冲突 <b class="${(r.blastRadius || {}).manualConflicts ? 'cg-conflict' : 'cg-done'}">${(r.blastRadius || {}).manualConflicts}</b></span>
+    </div>
+    <p class="cg-answer">${esc((r.answer || {}).conclusion || '')}</p>
+    ${conflicts ? `<div class="cg-conflicts">${conflicts}</div>` : '<div class="verdict ok" style="font-size:14px">无未决冲突</div>'}
+    ${watch ? `<div class="cg-watch"><b>共享岸桥下游扫描：</b><ul>${watch}</ul></div>` : ''}
+    <div><b>已完成、可保留的工序：</b>${retained}
+      <div class="hint">另有 ${recs} 条已完成装卸台账，数据库触发器禁止改写/删除。</div></div>
+    ${seqs}
+    <details class="cg-details"><summary>依赖边追踪（岸桥 / 堆位 / 跨泊位窗口，共 ${edges.length} 条）</summary>
+      <table class="data cg-table"><thead><tr><th>下游工序</th><th>依赖前置</th><th>类型</th><th>间隔</th><th>说明</th></tr></thead><tbody>
+      ${edges.map((e) => `<tr><td>${esc(e.op)}</td><td>${esc(e.on)}</td>
+        <td><span class="badge CANDIDATE">${esc(e.kind)}</span></td><td>${e.gap}m</td>
+        <td class="hint">${esc(e.detail || '')}${e.propagate ? '' : '（仅追踪/判冲突）'}</td></tr>`).join('')}
+      </tbody></table>
+    </details>`;
+}
+
+function renderCargoConflict(c) {
+  const opts = (c.options || []).map((o) => {
+    const clickable = o.optionId === 'REASSIGN_B_TO_C2' || o.optionId === 'KEEP_C_NOTIFIED'
+      ? `onclick="cgChooseC2(true)"`
+      : (o.optionId === 'WAIT_C1' || o.optionId === 'SHIFT_C_LATER' ? `onclick="cgChooseC2(false)"` : '');
+    return `<div class="cg-opt ${c.chosenOptionId === o.optionId ? 'chosen' : ''}" ${clickable}>
+      <b>${esc(o.label)}</b><div class="hint">${esc(o.effect)}</div></div>`;
+  }).join('');
+  return `<div class="cg-conflict-card">
+    <div class="cg-conflict-head">⛔ ${esc(c.title)} <span class="badge EXPIRED">${esc(c.code)}</span></div>
+    <p>${esc(c.message)}</p>
+    <div class="cg-opts">${opts}</div>
+    <div class="hint">当前选择：${esc(c.chosenOptionId || '-')}</div>
+  </div>`;
+}
+function cgChooseC2(v) { $('#cargo-c2').checked = v; runCargoBoth(); }
+
+function renderVoyageSeq(vs) {
+  const rows = (vs.sequence || []).map((o) => `<tr class="cg-row-${cgStateClass(o.state)}">
+      <td>${o.seqNo}</td><td><b>${esc(o.opCode)}</b><div class="hint">${esc(o.title)}</div></td>
+      <td>${esc(o.berthCode || '-')}</td>
+      <td>${esc(o.baselineResourceCode || '-')}${o.resourceCode !== o.baselineResourceCode ? ` → <b class="cg-reassign">${esc(o.resourceCode)}</b>` : ''}</td>
+      <td>${cgHM(o.baselineStart)}–${cgHM(o.baselineEnd)}</td>
+      <td class="${o.startDelayMinutes > 0 || o.endDelayMinutes > 0 ? 'cg-moved' : ''}">
+        ${cgHM(o.revisedStart)}–${cgHM(o.revisedEnd)}</td>
+      <td>${o.startDelayMinutes > 0 ? `起点+${o.startDelayMinutes}m` : ''}
+          ${o.endDelayMinutes > 0 ? ` 完工+${o.endDelayMinutes}m` : ''}</td>
+      <td><span class="badge ${cgStateClass(o.state)}">${CG_STATE_LABEL[o.state] || o.state}</span></td>
+    </tr>`).join('');
+  return `<details class="cg-voy" open><summary><b>船次 ${esc(vs.voyageCode)}</b>
+      <span class="hint">受影响工序 ${vs.affectedOpCount} ｜ 人工冲突 ${vs.hasManualConflict ? '有' : '无'}</span></summary>
+    <table class="data cg-table"><thead><tr><th>#</th><th>工序</th><th>泊位</th><th>资源</th>
+      <th>已通知时间</th><th>重算时间</th><th>偏移</th><th>状态</th></tr></thead><tbody>${rows}</tbody></table>
+  </details>`;
+}
+
+async function runCargoReplayUi() {
+  const btn = $('#btn-cargo-replay');
+  const box = $('#cargo-replay');
+  btn.disabled = true; box.innerHTML = '<div class="verdict ok">⏳ 运行 feature-3 断言（含数据库不可变自证）…</div>';
+  try {
+    const d = await api('/api/replays/cargo-change', { method: 'POST' });
+    const checks = d.checks || [];
+    const pass = checks.filter((c) => c.pass).length;
+    box.innerHTML = `<div class="verdict ${d.allPassed ? 'ok' : 'bad'}">
+        ${d.allPassed ? '✅' : '❌'} feature-3 回放：${pass}/${checks.length} 通过 · allPassed=${d.allPassed}</div>
+      <ul class="cg-checks">${checks.map((c) => `<li class="${c.pass ? 'cg-pass' : 'cg-fail'}">
+        ${c.pass ? '✓' : '✗'} ${esc(c.name)}${c.pass ? '' : `<div class="hint">期望 ${esc(JSON.stringify(c.expected))}；实际 ${esc(JSON.stringify(c.actual))}</div>`}
+      </li>`).join('')}</ul>`;
+  } catch (e) {
+    box.innerHTML = '<div class="verdict bad">回放失败：' + esc(e.message) + '</div>';
+  } finally { btn.disabled = false; }
 }
 
 boot();

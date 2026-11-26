@@ -79,6 +79,26 @@ public class DbTriggerInitializer implements ApplicationRunner {
                     ON resource_occupation
                     FOR EACH ROW EXECUTE FUNCTION fn_occupation_overlap_guard()
                 """);
-        log.info("数据库触发器初始化完成（作业记录不可变、资源占用互斥）");
+
+        // 3) feature-3 审计/装卸记录只增不改不删 ---------------------------
+        jdbc.execute("""
+                CREATE OR REPLACE FUNCTION fn_audit_row_immutable() RETURNS trigger AS $fn$
+                BEGIN
+                    RAISE EXCEPTION 'AUDIT_RECORD_IMMUTABLE: % cannot be updated or deleted (id=%)',
+                        TG_TABLE_NAME, COALESCE(OLD.id, NEW.id)
+                        USING ERRCODE = '45000';
+                END;
+                $fn$ LANGUAGE plpgsql
+                """);
+        for (String table : new String[]{"cargo_change", "handling_record"}) {
+            String trigger = "trg_" + table + "_immutable";
+            jdbc.execute("DROP TRIGGER IF EXISTS " + trigger + " ON " + table);
+            jdbc.execute("""
+                    CREATE TRIGGER %s
+                        BEFORE UPDATE OR DELETE ON %s
+                        FOR EACH ROW EXECUTE FUNCTION fn_audit_row_immutable()
+                    """.formatted(trigger, table));
+        }
+        log.info("数据库触发器初始化完成（作业/审计记录不可变、资源占用互斥）");
     }
 }

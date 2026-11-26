@@ -100,7 +100,7 @@ src/test/java/.../                # 4 个纯单元测试（约束数学 + 样例
 ### 5.1 Docker Compose（推荐，干净环境）
 
 ```bash
-cd /workspace/92
+cd /workspace/92-feature-3
 docker compose up --build
 ```
 
@@ -110,9 +110,11 @@ docker compose up --build
   库/用户/密码 `berth/berth/berth123`，数据卷 `pgdata`
 - 镜像构建内已配置 `docker/settings-docker.xml` 走阿里云 Maven 源
 
-> 本任务容器内没有安装 Docker CLI/守护进程，因此镜像构建与 `docker compose up` 未在本会话实际执行；
-> `docker-compose.yml` 已通过 YAML 解析校验，Dockerfile 为标准多阶段构建。应用本身已用等价方式
-> （JDK 25 + 可执行 jar + 真实 PostgreSQL 18）完整验证，见第 7 节。
+> 本任务容器内没有 Docker CLI/守护进程，因此镜像构建与 `docker compose up` 未在本会话实际执行。
+> `Dockerfile` 为标准多阶段构建（Maven 构建阶段会从最新源码编译 feature-3），`docker-compose.yml`
+> 沿用已通过 YAML 校验的基线；本会话已把 `Dockerfile`/`docker-compose.yml`/`scripts/*.sh` 统一为
+> LF 行尾，避免 CRLF 导致 bash 无法执行、Dockerfile 续行异常。应用本身已用等价方式
+> （JDK 25 + 可执行 jar + 真实 PostgreSQL 18，含**另建全新空库 `ccdev_f3` 首启**）完整验证，见第 7 节。
 
 ### 5.2 本地开发（使用任务容器预装运行时）
 
@@ -125,7 +127,7 @@ PostgreSQL 18 已在 `127.0.0.1:5432` 运行，开发库/账号 `ccdev/ccdev`：
 # 若数据库进程未运行，可尝试：
 # /opt/postgresql-18/bin/pg_ctl -D /tmp/cc-services/postgres -l /tmp/pg.log start
 
-cd /workspace/92
+cd /workspace/92-feature-3
 export JAVA_HOME=/opt/jdk-25
 mvn spring-boot:run
 # 或：mvn package && /opt/jdk-25/bin/java -jar target/berth-coordination.jar
@@ -177,12 +179,13 @@ mvn package
 ```bash
 # 启动 jar 后执行（默认 http://127.0.0.1:8080）
 bash scripts/replay.sh
-# ==> 断言：46/46 通过；allPassed=True
+# ==> 断言：75/75 通过；allPassed=True
 # ALL_REPLAY_CHECKS_PASSED
 ```
 
-该脚本真实登录、调用 `POST /api/replays/full`（约 12 秒，含真实 2s TTL 等待、
+该脚本真实登录、调用 `POST /api/replays/full`（约 10–12 秒，含真实 2s TTL 等待、
 500ms 扫描释放与双线程并发确认竞速），递归统计全部断言并以退出码反映结果。
+其中 **feature-3 货量变更双轨影响块 29/29**（也可单独 `POST /api/replays/cargo-change`）。
 
 此外实际执行并通过的验证：
 
@@ -193,6 +196,13 @@ bash scripts/replay.sh
 - 前端 `node --check app.js` 通过；所有按钮处理函数均有定义；`/`、`/app.js`、`/styles.css`、
   `/swagger-ui/index.html` 均实际返回 200。
 - 回放中包含**数据库层自证不可变**：对 `work_record` 直接 `UPDATE/DELETE` 被触发器拒绝。
+- **feature-3（本特性）实际执行并通过**：`POST /api/replays/cargo-change` → 29/29；
+  `bash scripts/replay.sh` → **75/75**（原顺序/扰动 46 + 货量变更 29）。另实测：
+  匿名 `GET /api/cargo/scenario` 401、TEAM 角色 `POST /api/cargo/changes` 403、
+  AGENT 经 `/api/voyages/A/cargo-changes` 用别名字段（declared/measured/extraMinutes/measuredAt）
+  录入成功并自动按 H1 解析 `opCode=A-H1`；`/swagger-ui/index.html`、`/v3/api-docs` 均 200，
+  OpenAPI 中出现 13 条 `/api/cargo...`、`/api/voyages/{voyageCode}/cargo-changes` 与
+  `/api/replays/cargo-change` 路径。前端 `node --check app.js` 通过，新标签 ⑥ 与 `runCargoBoth` 已随 `/app.js` 提供。
 
 ### 7.2 界面手工验证路径
 
@@ -212,8 +222,8 @@ bash scripts/replay.sh
 
 ## 8. 一键回放到底核对了什么
 
-`POST /api/replays/orderings`、`/api/replays/disruptions`、`/api/replays/full`
-（DISPATCHER/ADMIN）每次先重置固定样例，再输出带断言与完整时间线的报告：
+`POST /api/replays/orderings`、`/api/replays/disruptions`、`/api/replays/cargo-change`、
+`/api/replays/full`（DISPATCHER/ADMIN）每次先重置固定样例，再输出带断言与完整时间线的报告：
 
 | 回放块 | 核对点（全部 PASS） |
 | --- | --- |
@@ -226,10 +236,88 @@ bash scripts/replay.sh
 | **岸桥故障** | QC-2 20:45–22:30 故障生成 `CRANE_FAULT`；重排为 `SAME_SLOT_REASSIGN`，新分配含 QC-3 不含 QC-2；引航记录保留 |
 | **改靠指令** | 对 VOY-D 下达改靠 B2↔B3：新版本确认且泊位变化；≥4 条 `BERTH_CHANGE` 逐段影响说明 |
 | **ETA 迟到** | ETA 最早时间晚于计划靠泊点时生成 ≥4 条 `ETA_LATE`（引航/拖轮/靠泊/装卸），随后重排出 `CONFIRMED v2` |
+| **feature-3 货量变更（29 项，详见第 9 节）** | 两舱审计四要素齐全；依赖链受影响恰为 `[A,B]`、A-H1 到 14:00、B-H1 14:20(+20)、B 13:30 换班 `NEEDS_DECISION`、C1 重叠 30m、Y-A1 缺口 40 TEU、共享岸桥扫描预警 C +20；全港受影响 `[A,B,C]`、C-H1 16:40(+20) 且有 `SECOND_ORDER_CRANE_CASCADE`；改派 C2 后 B 准点、C 保 16:20、集合缩回 `[A,B]`；4 已完成工序 +2 台账保留；基线 A-H1 不落库改写；DB 阻止 UPDATE/DELETE `handling_record` 与 `cargo_change` |
 
 ---
 
-## 9. 主要 HTTP API
+## 9. 货量变更与“依赖链 / 全港”双轨影响（feature-3）
+
+独立的**日间作业网络**固定样例（`2026-11-26` 白天，船次代号就是 `A/B/C/D`，岸桥 `C1/C2/C3`，
+与晚间深水样例 `VOY-A..E / QC-1..4` 互不干扰；重置/回放会一并重建）。
+
+### 9.1 给定变更
+
+船代把 **A 船 H1、H2 两个舱口各补增 60 分钟作业**（`POST /api/cargo/given-change` 幂等写入）：
+
+| 舱口 | 原申报货量 | 复测货量 | 作业时长 | 来源 | 复测时点 |
+| --- | --- | --- | --- | --- | --- |
+| A/H1（C1，落 Y-A1） | 60 TEU / 150m | **80 TEU** | 150→210m（**+60**） | 船代补报＋中理货/水尺复测 `SRV-…-H1` | 10:05 |
+| A/H2（C2，落 Y-A1） | 40 TEU / 135m | **60 TEU** | 135→195m（**+60**） | 同上 `SRV-…-H2` | 10:10 |
+
+- 审计落在 `cargo_change` 表，**原申报 `original_value/original_declared_minutes`、复测值
+  `remeasured_value/revised_required_minutes`、来源 `source(+source_ref)`、时点 `observed_at`
+  与录入时间 `created_at`** 全部保存；该表有触发器 `trg_cargo_change_immutable`，只增不改不删。
+- 堆位 `Y-A1` 原计划 **200 TEU，现仅剩 100（一半）**；A 复测后需 140 TEU ⇒ **缺口 40 TEU**。
+- 依赖在 `operation_dependency` 中显式建边，四类：`PRECEDENCE`、`SHARED_CRANE`（共享岸桥）、
+  `YARD_CAPACITY`（堆位）、`CROSS_BERTH_WINDOW`（C1 在 B2↔B1 间的跨泊位转场窗口，20m）。
+
+### 9.2 两种重算的确切结果（回放 29 条断言锁定）
+
+| 维度 | `DEPENDENCY_CHAIN` 资源依赖链重算 | `FULL_PORT` 全港重排 |
+| --- | --- | --- |
+| 评估/受影响船次 | 评估 **A、B**；受影响 **[A, B]**；链外 **C、D 已通知计划不动** | 评估 **A、B、C、D**；受影响 **[A, B, C]**；仅 D 不变 |
+| A 船必移工序 | `A-H1` 10:30–**14:00**（完工 +60，C1 占到 14:00）；`A-H2`→**13:30**；`A-XFER-C1`→14:00–14:20；`A-TRIM`→14:00–14:30；`A-UNBERTH`→**14:30–15:00** | 同左 |
+| B 船 | `B-PREP` 仍 **13:30–14:00** 但标 `NEEDS_DECISION`；`B-H1` 最早 **14:20**（+20，等 C1＋跨泊位 20m）；`B-UNBERTH` **16:50–17:20**（+20） | 同左 |
+| 额外波及 | 共享岸桥下游扫描**不会漏掉 B**，并对链外 **C/C-H1 给出 `SHARED_CRANE_DOWNSTREAM_WATCH`（潜在 +20m）预警**，但不替 C 改计划 | 全局资源平衡坐实二阶冲突：**`C-H1` 16:20→16:40（+20）、`C-UNBERTH` +20**——无关 C 船 16:20 的已通知计划被改动 |
+| 需人工选择的冲突 | ① `CRANE_PREP_OVERLAP`：C1 与 B 13:30 换班准备**重叠 30m**，选项 `WAIT_C1`（B +20，推荐）/ `REASSIGN_B_TO_C2`（B 准点）；② `YARD_CAPACITY_SHORTFALL`：缺口 40 TEU，选项 `OVERFLOW_YA2`（溢流 Y-A2 40 TEU，推荐）/ `RUSH_PICKUP`（12:00 前紧急疏港） | 同两项，**外加** ③ `SECOND_ORDER_CRANE_CASCADE`：B 顺延经 C1 连锁撞 C 船 16:20，选项 `SHIFT_C_LATER`（C +20，全局默认，改动无关船）/ `KEEP_C_NOTIFIED`（B 改 C2、保住 C 时刻） |
+| 已完成可保留 | **4 个 DONE 工序**（引航/靠泊/两个上午批次）时间零移动，**2 条 `handling_record` 装卸台账原样保留**；DB 触发器拒绝 `UPDATE/DELETE` | 同左 |
+
+**人工改派的实际效果**：在 `choices` 传 `{"CRANE_C1_PREP":"REASSIGN_B_TO_C2"}`
+（或 GET `?crane=C2`、界面勾选“B 改派 C2”）后，`B-H1/B-PREP` 改用 C2，B-H1 **14:00 准点**、
+C1×换班冲突消失；全港模式下 `C-H1` 也**保住 16:20**，受影响集合缩回 `[A,B]`、无二阶冲突。
+分析全程是 **what-if 投影**：只写 `impact_report`，不更新 `port_operation` 基线
+（回放会断言多次分析后库中 `A-H1` 仍是 10:30–13:00），更不触碰已完成记录。
+
+### 9.3 怎么验证 / 调用
+
+界面：用 `dispatch/dispatch123` 登录 → 标签 **⑥ 货量变更·双轨影响** →
+“录入给定变更并计算两种结果”，可勾选“B 改派 C2”对照；页内可直接跑 feature-3 回放断言。
+
+```bash
+TOKEN=$(curl -s -X POST http://127.0.0.1:8080/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"dispatch","password":"dispatch123"}' \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+
+# 一次拿两种结果 + 对照（该调用会幂等补录给定变更）
+curl -s -X POST http://127.0.0.1:8080/api/cargo/analyze-both \
+  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
+
+# 分别跑两种模式
+curl -s "http://127.0.0.1:8080/api/cargo/analyze?mode=DEPENDENCY_CHAIN" -H "Authorization: Bearer $TOKEN"
+curl -s "http://127.0.0.1:8080/api/cargo/analyze?mode=FULL_PORT"        -H "Authorization: Bearer $TOKEN"
+# 人工选择 B 改 C2
+curl -s "http://127.0.0.1:8080/api/cargo/analyze-both?crane=C2"         -H "Authorization: Bearer $TOKEN"
+# 仅 feature-3 的 29 条断言
+curl -s -X POST http://127.0.0.1:8080/api/replays/cargo-change \
+  -H "Authorization: Bearer $TOKEN" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["allPassed"],sum(c["pass"] for c in d["checks"]),"/",len(d["checks"]))'
+```
+
+自定义录入（AGENT/DISPATCHER，字段名宽松兼容）：
+
+```bash
+curl -s -X POST http://127.0.0.1:8080/api/voyages/A/cargo-changes \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"hatchCode":"H1","declaredValue":60,"measuredValue":88,
+       "extraMinutes":80,"source":"SGS 水尺复测","measuredAt":"2026-11-26T10:40:00"}'
+```
+
+主要读取端点：`GET /api/cargo/scenario`（场景总览）、`/api/cargo/dependencies?voyageCode=A`
+（依赖图与岸桥/堆位/跨泊位分组）、`/api/cargo/changes?batchNo=…`、`/api/cargo/reports[/{id}]`。
+
+---
+
+## 10. 主要 HTTP API
 
 | 方法/路径 | 角色 | 说明 |
 | --- | --- | --- |
@@ -251,12 +339,20 @@ bash scripts/replay.sh
 | `POST /api/plans/{id}/replan` | DISPATCHER+ | 扰动重排（默认自动确认） |
 | `POST /api/plans/{id}/change-berth` | DISPATCHER+ | 改靠/改时指令 |
 | `GET /api/disruptions[/{id}]` | 登录 | 扰动与影响项 |
-| `POST /api/replays/orderings|disruptions|full` | DISPATCHER+ | 一键回放 |
-| `POST /api/admin/reset` | DISPATCHER+ | 清空并恢复固定样例 |
+| `GET /api/cargo/scenario` | 登录 | feature-3 日间场景：舱口/堆位/工序/依赖/给定变更草稿 |
+| `GET /api/cargo/dependencies[?voyageCode=A]` | 登录 | 工序依赖图 + 岸桥/堆位/跨泊位窗口依赖分组 |
+| `GET /api/cargo/changes[?batchNo=]`、`GET /api/voyages/{A}/cargo-changes` | 登录 | 货量变更审计（原申报/复测/来源/时点） |
+| `POST /api/cargo/changes`、`POST /api/voyages/{code}/cargo-changes` | AGENT+ | 录入变更（宽松字段，支持 `changes/items` 批量） |
+| `POST /api/cargo/given-change` | AGENT+ | 幂等写入 A 两舱各 +60m 的题目给定变更 |
+| `POST/GET /api/cargo/analyze`（别名 `/api/cargo/impact`） | 登录 | `body/query`：`batchNo`、`mode=DEPENDENCY_CHAIN\|FULL_PORT`、`choices` |
+| `POST/GET /api/cargo/analyze-both`（别名 `/api/cargo/impact-both`） | 登录 | 一次返回两种结果 + 对照；GET 支持 `?crane=C2` |
+| `POST /api/cargo/analyze-given`、`GET /api/cargo/reports[/{id}]` | 登录 | 补录给定变更后分析 / 历史报告 |
+| `POST /api/replays/orderings|disruptions|cargo-change|full` | DISPATCHER+ | 一键回放（`full` 含全部，当前 75 条断言） |
+| `POST /api/admin/reset` | DISPATCHER+ | 清空并恢复固定样例（含 feature-3 网络） |
 
 ---
 
-## 10. 配置与运维说明
+## 11. 配置与运维说明
 
 - `app.planning.hold-on-stage`、`app.planning.default-hold-ttl-seconds`、
   `app.planning.candidate-step-minutes`、`app.planning.max-wait-minutes` 见 `application.yml`，
